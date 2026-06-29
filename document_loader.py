@@ -1,5 +1,6 @@
 import io
 import re
+import os
 from PyPDF2 import PdfReader
 from docx import Document
 import streamlit as st
@@ -35,13 +36,16 @@ def load_and_split_document(uploaded_file, parent_size=1200, parent_overlap=150,
         # Build hierarchical chunks list
         hierarchical_chunks = []
         for parent_chunk in parent_chunks:
+            page_number = find_page_number(text, parent_chunk)
+            
             # Split parent chunk into child chunks
             child_chunks = split_text_with_overlap(parent_chunk, child_size, child_overlap)
             for child in child_chunks:
                 if len(child.strip()) > 30:  # Filter out very short child chunks
                     hierarchical_chunks.append({
                         "child": child.strip(),
-                        "parent": parent_chunk.strip()
+                        "parent": parent_chunk.strip(),
+                        "page_number": page_number
                     })
         
         if not hierarchical_chunks:
@@ -49,7 +53,8 @@ def load_and_split_document(uploaded_file, parent_size=1200, parent_overlap=150,
             if len(text.strip()) > 0:
                 hierarchical_chunks.append({
                     "child": text.strip()[:child_size],
-                    "parent": text.strip()
+                    "parent": text.strip(),
+                    "page_number": 1
                 })
             else:
                 raise ValueError("No valid chunks created from the document")
@@ -241,3 +246,45 @@ def validate_document(uploaded_file):
         return False, f"Unsupported file type: {uploaded_file.type}"
     
     return True, "Valid document"
+
+def find_page_number(full_text, chunk_text):
+    """Find the page number that a chunk belongs to by searching backwards in full_text"""
+    try:
+        idx = full_text.find(chunk_text)
+        if idx == -1:
+            return 1
+            
+        preceding_text = full_text[:idx]
+        matches = list(re.finditer(r'---\s*Page\s*(\d+)\s*---', preceding_text))
+        if matches:
+            return int(matches[-1].group(1))
+            
+        match_inside = re.search(r'---\s*Page\s*(\d+)\s*---', chunk_text)
+        if match_inside:
+            return int(match_inside.group(1))
+            
+        return 1
+    except Exception:
+        return 1
+
+def save_pdf_locally(uploaded_file):
+    """Save the uploaded PDF file to the data/uploaded_pdfs/ directory"""
+    try:
+        dir_path = "data/uploaded_pdfs"
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+            
+        file_path = os.path.join(dir_path, uploaded_file.name)
+        
+        # Save bytes
+        uploaded_file.seek(0)
+        file_bytes = uploaded_file.read()
+        with open(file_path, "wb") as f:
+            f.write(file_bytes)
+            
+        # Reset file pointer for subsequent reads
+        uploaded_file.seek(0)
+        return True
+    except Exception as e:
+        st.error(f"Error saving PDF locally: {str(e)}")
+        return False

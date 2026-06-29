@@ -1,11 +1,61 @@
 import time
 from datetime import datetime
 import streamlit as st
+import base64
+import os
+import re
 
 from document_loader import load_and_split_document, validate_document
 from qa_engine import generate_answer_stream, generate_answer, validate_api_configuration, get_model_info
 from vector_store import VectorStore
 from utils import export_chat_history, get_document_insights, is_conversational_query
+
+def get_pdf_search_phrase(text, max_words=5):
+    """Extract a clean short phrase from the citation text to search and highlight in the PDF"""
+    try:
+        # Strip special characters and normalize spaces
+        cleaned = re.sub(r'[^\w\s]', ' ', text).strip()
+        words = cleaned.split()
+        if not words:
+            return ""
+        return " ".join(words[:max_words])
+    except Exception:
+        return ""
+
+def save_app_state():
+    """Persist vector store, uploaded files list, and chat threads to disk"""
+    try:
+        if not os.path.exists("data"):
+            os.makedirs("data")
+            
+        # 1. Save Vector Store
+        if st.session_state.vs is not None:
+            st.session_state.vs.save_index("data/vector_store.pkl")
+        else:
+            if os.path.exists("data/vector_store.pkl"):
+                try:
+                    os.remove("data/vector_store.pkl")
+                except Exception:
+                    pass
+            if os.path.exists("data/vector_store.pkl.faiss"):
+                try:
+                    os.remove("data/vector_store.pkl.faiss")
+                except Exception:
+                    pass
+                
+        # 2. Save Application Metadata
+        metadata = {
+            "uploaded_files": st.session_state.uploaded_files,
+            "threads": st.session_state.threads,
+            "current_thread_id": st.session_state.current_thread_id,
+            "theme": st.session_state.theme,
+            "llm_settings": st.session_state.llm_settings
+        }
+        with open("data/app_metadata.pkl", "wb") as f:
+            import pickle
+            pickle.dump(metadata, f)
+    except Exception as e:
+        st.error(f"Error persisting app state: {str(e)}")
 
 st.set_page_config(
     page_title="Atlas Document Assistant",
@@ -357,22 +407,74 @@ def inject_theme_styles(theme_name):
     )
 
 def initialize_session_state():
+    # Load metadata from disk if it exists
+    loaded_metadata = None
+    if os.path.exists("data/app_metadata.pkl"):
+        try:
+            with open("data/app_metadata.pkl", "rb") as f:
+                import pickle
+                loaded_metadata = pickle.load(f)
+        except Exception:
+            pass
+
+    # Load vector store from disk if it exists
     if "vs" not in st.session_state:
-        st.session_state.vs = None
-    if "threads" not in st.session_state:
-        st.session_state.threads = {
-            "default": {"name": "Default Thread", "history": []}
-        }
-    if "current_thread_id" not in st.session_state:
-        st.session_state.current_thread_id = "default"
-    
+        if os.path.exists("data/vector_store.pkl"):
+            try:
+                vs = VectorStore()
+                vs.load_index("data/vector_store.pkl")
+                st.session_state.vs = vs
+            except Exception:
+                st.session_state.vs = None
+        else:
+            st.session_state.vs = None
+
+    if loaded_metadata:
+        if "threads" not in st.session_state:
+            st.session_state.threads = loaded_metadata.get("threads", {
+                "default": {"name": "Default Thread", "history": []}
+            })
+        if "current_thread_id" not in st.session_state:
+            st.session_state.current_thread_id = loaded_metadata.get("current_thread_id", "default")
+        if "uploaded_files" not in st.session_state:
+            st.session_state.uploaded_files = loaded_metadata.get("uploaded_files", [])
+        if "theme" not in st.session_state:
+            st.session_state.theme = loaded_metadata.get("theme", "Light")
+        if "llm_settings" not in st.session_state:
+            st.session_state.llm_settings = loaded_metadata.get("llm_settings", {
+                "provider": "Mistral",
+                "model": "mistral-small",
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "max_tokens": 1500,
+                "api_key": "",
+                "ollama_url": "http://localhost:11434"
+            })
+    else:
+        if "threads" not in st.session_state:
+            st.session_state.threads = {
+                "default": {"name": "Default Thread", "history": []}
+            }
+        if "current_thread_id" not in st.session_state:
+            st.session_state.current_thread_id = "default"
+        if "uploaded_files" not in st.session_state:
+            st.session_state.uploaded_files = []
+        if "theme" not in st.session_state:
+            st.session_state.theme = "Light"
+        if "llm_settings" not in st.session_state:
+            st.session_state.llm_settings = {
+                "provider": "Mistral",
+                "model": "mistral-small",
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "max_tokens": 1500,
+                "api_key": "",
+                "ollama_url": "http://localhost:11434"
+            }
+            
     # Point history reference to active thread's history
     st.session_state.history = st.session_state.threads[st.session_state.current_thread_id]["history"]
     
-    if "uploaded_files" not in st.session_state:
-        st.session_state.uploaded_files = []
-    if "theme" not in st.session_state:
-        st.session_state.theme = "Light"
     if "allowed_documents" not in st.session_state:
         st.session_state.allowed_documents = None
     if "app_mode" not in st.session_state:
@@ -381,18 +483,14 @@ def initialize_session_state():
         st.session_state.comparison_doc_a = ""
     if "comparison_doc_b" not in st.session_state:
         st.session_state.comparison_doc_b = ""
+    if "pdf_view_file" not in st.session_state:
+        st.session_state.pdf_view_file = None
+    if "pdf_view_page" not in st.session_state:
+        st.session_state.pdf_view_page = 1
+    if "pdf_view_search" not in st.session_state:
+        st.session_state.pdf_view_search = ""
     
     # LLM Settings
-    if "llm_settings" not in st.session_state:
-        st.session_state.llm_settings = {
-            "provider": "Mistral",
-            "model": "mistral-small",
-            "temperature": 0.3,
-            "top_p": 0.9,
-            "max_tokens": 1500,
-            "api_key": "",
-            "ollama_url": "http://localhost:11434"
-        }
 
 def get_stats():
     if not st.session_state.vs:
@@ -455,6 +553,7 @@ def render_sidebar():
             st.session_state.threads[new_tid] = {"name": f"Thread {len(st.session_state.threads) + 1}", "history": []}
             st.session_state.current_thread_id = new_tid
             st.session_state.history = []
+            save_app_state()
             st.rerun()
     with col2:
         if len(st.session_state.threads) > 1:
@@ -463,6 +562,7 @@ def render_sidebar():
                 first_remaining = list(st.session_state.threads.keys())[0]
                 st.session_state.current_thread_id = first_remaining
                 st.session_state.history = st.session_state.threads[first_remaining]["history"]
+                save_app_state()
                 st.rerun()
 
     # Search Source Filter
@@ -503,6 +603,7 @@ def render_sidebar():
     if st.sidebar.button("Clear current chat", use_container_width=True):
         st.session_state.history = []
         st.session_state.threads[st.session_state.current_thread_id]["history"] = []
+        save_app_state()
         st.rerun()
 
     if st.session_state.uploaded_files and st.sidebar.button("Remove all documents", use_container_width=True):
@@ -511,6 +612,7 @@ def render_sidebar():
         st.session_state.history = []
         for tid in st.session_state.threads:
             st.session_state.threads[tid]["history"] = []
+        save_app_state()
         st.rerun()
 
 def render_upload_panel():
@@ -570,6 +672,9 @@ def process_uploaded_files(uploaded_files):
         progress_bar.progress((index + 1) / len(new_files))
 
         try:
+            from document_loader import save_pdf_locally
+            save_pdf_locally(uploaded_file)
+            
             chunks = load_and_split_document(uploaded_file)
 
             if st.session_state.vs is None:
@@ -594,6 +699,7 @@ def process_uploaded_files(uploaded_files):
 
     progress_bar.empty()
     status_text.empty()
+    save_app_state()
     time.sleep(0.35)
     st.rerun()
 
@@ -649,7 +755,7 @@ def render_metrics_row():
             unsafe_allow_html=True,
         )
 
-def render_citations(metadata):
+def render_citations(metadata, msg_idx):
     confidence = metadata.get("confidence", 0)
     source_file = metadata.get("source_file", "Document")
     response_time = metadata.get("response_time", 0)
@@ -671,47 +777,72 @@ def render_citations(metadata):
     child_chunks = metadata.get("child_chunks", [])
     parent_chunks = metadata.get("parent_chunks", [])
     source_files = metadata.get("source_files", [source_file] * len(child_chunks))
+    page_numbers = metadata.get("page_numbers", [1] * len(child_chunks))
     
     if child_chunks:
+        if len(page_numbers) < len(child_chunks):
+            page_numbers += [1] * (len(child_chunks) - len(page_numbers))
+            
         with st.expander("🔍 View Retrieved Source Citations"):
             if is_comparison:
                 tab_a, tab_b = st.tabs([f"📄 {doc_a} Sources", f"📄 {doc_b} Sources"])
                 
                 with tab_a:
                     count_a = 1
-                    for child, parent, sfile in zip(child_chunks, parent_chunks, source_files):
+                    for child, parent, sfile, page_num in zip(child_chunks, parent_chunks, source_files, page_numbers):
                         if sfile == doc_a:
-                            st.markdown(f"**Source Snippet {count_a}:**")
+                            st.markdown(f"**Source Snippet {count_a}:** (Page {page_num})")
                             c_tab, p_tab = st.tabs(["Snippet", "Full Context"])
                             with c_tab:
                                 st.info(child)
                             with p_tab:
                                 st.caption(parent)
+                            if sfile.lower().endswith(".pdf"):
+                                search_phrase = get_pdf_search_phrase(child)
+                                if st.button(f"📖 Open {sfile} on Page {page_num}", key=f"btn_comp_{msg_idx}_a_{count_a}_{page_num}"):
+                                    st.session_state.pdf_view_file = sfile
+                                    st.session_state.pdf_view_page = page_num
+                                    st.session_state.pdf_view_search = search_phrase
+                                    st.rerun()
                             count_a += 1
                     if count_a == 1:
                         st.write("No matching citations retrieved for this document.")
                         
                 with tab_b:
                     count_b = 1
-                    for child, parent, sfile in zip(child_chunks, parent_chunks, source_files):
+                    for child, parent, sfile, page_num in zip(child_chunks, parent_chunks, source_files, page_numbers):
                         if sfile == doc_b:
-                            st.markdown(f"**Source Snippet {count_b}:**")
+                            st.markdown(f"**Source Snippet {count_b}:** (Page {page_num})")
                             c_tab, p_tab = st.tabs(["Snippet", "Full Context"])
                             with c_tab:
                                 st.info(child)
                             with p_tab:
                                 st.caption(parent)
+                            if sfile.lower().endswith(".pdf"):
+                                search_phrase = get_pdf_search_phrase(child)
+                                if st.button(f"📖 Open {sfile} on Page {page_num}", key=f"btn_comp_{msg_idx}_b_{count_b}_{page_num}"):
+                                    st.session_state.pdf_view_file = sfile
+                                    st.session_state.pdf_view_page = page_num
+                                    st.session_state.pdf_view_search = search_phrase
+                                    st.rerun()
                             count_b += 1
                     if count_b == 1:
                         st.write("No matching citations retrieved for this document.")
             else:
-                for i, (child, parent, sfile) in enumerate(zip(child_chunks, parent_chunks, source_files), 1):
-                    st.markdown(f"**Source {i}:** `{sfile}`")
+                for i, (child, parent, sfile, page_num) in enumerate(zip(child_chunks, parent_chunks, source_files, page_numbers), 1):
+                    st.markdown(f"**Source {i}:** `{sfile}` (Page {page_num})")
                     c_tab, p_tab = st.tabs(["Child Snippet (Matched)", "Parent Context (LLM Input)"])
                     with c_tab:
                         st.info(child)
                     with p_tab:
                         st.caption(parent)
+                    if sfile.lower().endswith(".pdf"):
+                        search_phrase = get_pdf_search_phrase(child)
+                        if st.button(f"📖 Open {sfile} on Page {page_num}", key=f"btn_std_{msg_idx}_{i}_{page_num}"):
+                            st.session_state.pdf_view_file = sfile
+                            st.session_state.pdf_view_page = page_num
+                            st.session_state.pdf_view_search = search_phrase
+                            st.rerun()
 
 def render_chat_interface():
     st.markdown('<div class="chat-shell">', unsafe_allow_html=True)
@@ -772,13 +903,13 @@ def render_chat_interface():
             return
 
     # 1. Render historical messages of current thread
-    for question, answer, _, metadata in st.session_state.history:
+    for msg_idx, (question, answer, _, metadata) in enumerate(st.session_state.history):
         with st.chat_message("user", avatar="🧑‍💻"):
             st.markdown(question)
 
         with st.chat_message("assistant", avatar="🧭"):
             st.markdown(answer)
-            render_citations(metadata)
+            render_citations(metadata, msg_idx)
 
     # 2. Render live streaming output if active
     if "streaming_question" in st.session_state and st.session_state.streaming_question:
@@ -850,10 +981,14 @@ def render_chat_interface():
                         else 0
                     )
                     
+                    search_metadata = search_results.get("metadata", [])
+                    page_numbers = [m.get("page_number", 1) for m in search_metadata]
+                    
                     metadata = {
                         "confidence": 1.0 if is_chitchat else confidence,
                         "source_file": "General Chat" if is_chitchat else (f"{st.session_state.get('comparison_doc_a', 'Doc A')} & {st.session_state.get('comparison_doc_b', 'Doc B')}" if is_comparison else search_results.get("source_files", ["Unknown"])[0]),
                         "source_files": search_results.get("source_files", ["Unknown"]),
+                        "page_numbers": page_numbers,
                         "response_time": response_time,
                         "timestamp": datetime.now().isoformat(),
                         "child_chunks": search_results.get("child_chunks", []),
@@ -867,6 +1002,7 @@ def render_chat_interface():
                     # Save to active history state
                     st.session_state.history.append((question, full_response, context, metadata))
                     st.session_state.threads[st.session_state.current_thread_id]["history"] = st.session_state.history
+                    save_app_state()
                     
                     # Reset streaming state and refresh UI to fully render
                     st.session_state.streaming_question = None
@@ -1088,15 +1224,100 @@ def main():
     ])
     
     with tab_chat:
-        render_upload_panel()
-        st.write("")
-        render_chat_interface()
+        # Check if PDF Viewer is active and we have uploaded files
+        is_pdf_viewer_active = st.session_state.pdf_view_file is not None
+        
+        if is_pdf_viewer_active:
+            col_chat, col_pdf = st.columns([3, 2])
+            
+            with col_chat:
+                render_upload_panel()
+                st.write("")
+                render_chat_interface()
+                
+            with col_pdf:
+                render_pdf_viewer_panel()
+        else:
+            render_upload_panel()
+            st.write("")
+            render_chat_interface()
         
     with tab_analytics:
         render_analytics_dashboard()
         
     with tab_config:
         render_configuration_panel()
+
+def render_pdf_viewer_panel():
+    st.markdown('<div class="chat-shell" style="height: 100%;">', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="section-title">
+            <h2>Interactive PDF Viewer</h2>
+            <span>Synchronized source tracking with page jumps</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    
+    pdf_filename = st.session_state.pdf_view_file
+    page_num = st.session_state.pdf_view_page
+    
+    # Close / control header row
+    col_hdr_title, col_hdr_btn = st.columns([4, 1])
+    with col_hdr_title:
+        st.markdown(f"📄 **Viewing**: `{pdf_filename}`")
+    with col_hdr_btn:
+        if st.button("Close ❌", key="btn_close_pdf_viewer"):
+            st.session_state.pdf_view_file = None
+            st.session_state.pdf_view_page = 1
+            st.rerun()
+            
+    # Page controls
+    col_prev, col_pg_input, col_next = st.columns([1, 2, 1])
+    with col_prev:
+        if st.button("◀ Prev", key="btn_pdf_viewer_prev"):
+            if st.session_state.pdf_view_page > 1:
+                st.session_state.pdf_view_page -= 1
+                st.rerun()
+    with col_pg_input:
+        st.markdown(f"<div style='text-align: center; margin-top: 5px; font-weight: bold;'>Page {page_num}</div>", unsafe_allow_html=True)
+    with col_next:
+        if st.button("Next ▶", key="btn_pdf_viewer_next"):
+            st.session_state.pdf_view_page += 1
+            st.rerun()
+            
+    # Load and display base64 PDF
+    pdf_path = os.path.join("data/uploaded_pdfs", pdf_filename)
+    if not os.path.exists(pdf_path):
+        st.error(f"File not found: `{pdf_path}`. Please verify if it was deleted.")
+    else:
+        try:
+            with open(pdf_path, "rb") as f:
+                base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+                
+            search_phrase = st.session_state.get("pdf_view_search", "")
+            if search_phrase:
+                import urllib.parse
+                encoded_search = urllib.parse.quote(f'"{search_phrase}"')
+                pdf_url = f"data:application/pdf;base64,{base64_pdf}#page={page_num}&search={encoded_search}"
+            else:
+                pdf_url = f"data:application/pdf;base64,{base64_pdf}#page={page_num}"
+                
+            pdf_html = f'''
+            <iframe 
+                src="{pdf_url}" 
+                width="100%" 
+                height="700px" 
+                style="border: 1px solid var(--border); border-radius: 12px;"
+                type="application/pdf">
+            </iframe>
+            '''
+            st.markdown(pdf_html, unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Failed to render PDF: {str(e)}")
+            
+    st.markdown("</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

@@ -58,9 +58,11 @@ class VectorStore:
                 if isinstance(chunk_item, dict):
                     child_text = chunk_item.get("child", "")
                     parent_text = chunk_item.get("parent", child_text)
+                    page_number = chunk_item.get("page_number", 1)
                 else:
                     child_text = chunk_item
                     parent_text = chunk_item
+                    page_number = 1
                 
                 self.chunks.append(child_text)
                 self.chunk_metadata.append({
@@ -69,7 +71,8 @@ class VectorStore:
                     'global_index': start_index + i,
                     'chunk_length': len(child_text),
                     'parent_text': parent_text,
-                    'child_text': child_text
+                    'child_text': child_text,
+                    'page_number': page_number
                 })
             
             # Update document mapping

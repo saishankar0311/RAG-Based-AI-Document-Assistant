@@ -116,3 +116,29 @@ To make it easy to analyze changes and compare different source documents side-b
   - Chunks from both sources are formatted with clean headers (`=== SOURCE DOCUMENT A ===` and `=== SOURCE DOCUMENT B ===`) and fed into a custom comparison prompt template.
   - The template guides the LLM to output comparisons clearly, utilizing a side-by-side Markdown comparison table.
   - Citations are grouped into two separate tabs matching Document A and Document B for easy verification.
+
+---
+
+## 11. Interactive PDF Viewer with Page Jump
+
+To allow users to view actual source PDF documents directly within the interface in a synchronized manner, we built a custom double-column PDF viewer layout.
+
+- **How it works**:
+  - When you upload a PDF file, it is automatically cached inside the project directory under `data/uploaded_pdfs/`.
+  - When the document is processed, each chunk's position in the text is matched backwards to identify its exact page number inside the PDF, which is stored in the vector index's search metadata.
+  - In the chat bubbles, expanding any source citation reveals a button labeled `📖 Open [file] on Page N`.
+  - Clicking this button opens a side-by-side workspace: the left side displays the chat thread, and the right side opens the interactive PDF viewer.
+  - The viewer automatically jumps to the cited page using native browser URL parameters (`#page=N`) and provides manual page navigation buttons (`Prev` and `Next`).
+
+---
+
+## 12. Automatic State Persistence & Caching
+
+To prevent losing uploaded documents, vector store segments, and chat threads upon page reload, we integrated a full disk persistence framework.
+
+- **How it works**:
+  - The application automatically tracks state mutations (such as file uploads, thread creations/deletions, history clears, and assistant replies).
+  - On every mutation, the app serializes the current state:
+    - **Vector Store**: Saved to `data/vector_store.pkl` (with the FAISS index written separately to `data/vector_store.pkl.faiss`).
+    - **Session Metadata**: Stores the uploaded files registry list, thread dictionary (with message history logs), active thread ID, and active slider configuration inside `data/app_metadata.pkl`.
+  - When the app is initialized (e.g. on page refresh or startup), it checks for these files and automatically re-populates the vector index and session state, allowing for a completely seamless experience.
